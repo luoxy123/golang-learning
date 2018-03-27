@@ -1,0 +1,293 @@
+variables:
+  # 默认变量
+  VERSION_CODE: 'v0.0.0'
+  TYPE: 'sv'  # [ms- 微服务] [gw- 平台接口] [sv- 服务]  [web-前端]  !!!!请修改
+  SERVICE_NAME: 'feiniu.sv.pay.service' # feiniu.${TYPE}.oathkeeper.service
+  
+  # go 服务变量
+  BUILD_PATH: 'code.feelbus.cn/${CI_PROJECT_NAMESPACE}'
+  
+stages:
+  - build
+  - test
+  - deploy
+
+# 默认步骤 不做操作
+default_build_job:
+    stage: build
+    script:
+      - echo 'this is default build.'  
+
+
+# 内网测试环境编译
+staging_build_job:
+  stage: build
+  variables:
+    PKG_NAME: ${TYPE}_${CI_PROJECT_NAME}_${VERSION_CODE}_${CI_PIPELINE_ID}
+    PKG_PATH: ${TYPE}/${CI_PROJECT_NAME}/${VERSION_CODE}
+  script:
+    - echo "Begin Build"
+    - source /etc/profile
+    - if [ ! -x ~/go/gocode/src/${BUILD_PATH}/ ]; then mkdir -p ~/go/gocode/src/${BUILD_PATH}/ ; fi
+    
+    # 删除编译目录
+    - cd ~/go/gocode/src/${BUILD_PATH}/ && rm ${CI_PROJECT_NAME}/* -rf && cd -
+    
+    # 拷贝项目源码到 编译目录下（go 的编译目录在profile中设置）
+    - cp ../${CI_PROJECT_NAME} ~/go/gocode/src/${BUILD_PATH}/ -rf
+    # 执行编译
+    - go build  ${BUILD_PATH}/${CI_PROJECT_NAME}
+
+    # 删除编译目录
+    - cd ~/go/gocode/src/${BUILD_PATH} && rm ${CI_PROJECT_NAME}/* -rf && cd -
+    
+    # 复制编译后的二进制文件到 存档目录
+    - if [ ! -x ./publish ]; then mkdir -p ./publish; fi
+    - cp ${CI_PROJECT_NAME} ./publish/
+
+
+    # 创建打包目录
+    - if [ ! -x ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/ ]; then mkdir -p ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/; fi 
+    # 打包存档目录，复制到打包目录
+    - tar -czf ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/${PKG_NAME}.tar.gz publish
+    
+  environment:
+    name: staging
+  tags:
+    - staging
+  only:
+    - test
+    
+# 内网服务器测试部署
+staging_deploy_job:
+  stage: deploy
+  variables: 
+    PKG_NAME: ${TYPE}_${CI_PROJECT_NAME}_${VERSION_CODE}_${CI_PIPELINE_ID}
+    PKG_PATH: ${TYPE}/${CI_PROJECT_NAME}/${VERSION_CODE}
+  script:
+  
+    # saltmaster 路径为: salt://pkg/<enviroment>/<TYPE>/项目/版本/xxx.tar.gz 如果不存在 先创建
+    - ssh -i ${SALT_KEY_PATH} ubuntu@${SALT_SERVER_NAME} \ 
+      "if [ ! -x /srv/salt/pkg/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/ ]; then sudo su && mkdir -p /srv/salt/pkg/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/ ; fi"
+
+    # 复制runner 上的程序打包文件到 saltstack master 
+    - cd ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/
+    - sudo scp -i ${SALT_KEY_PATH} ./${PKG_NAME}.tar.gz ubuntu@$SALT_SERVER_NAME://srv/salt/pkg/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/
+    
+    # 部署脚本 所有微服务共用一个脚本 提供完整参数
+    - ssh -i ${SALT_KEY_PATH} ubuntu@${SALT_SERVER_NAME} \
+      "sudo sh /srv/salt/script/staging/deploy.sh --pipeline=${CI_PIPELINE_ID} --version=${VERSION_CODE} --project=${CI_PROJECT_NAME}" --app_type=${TYPE} --environment=${CI_ENVIRONMENT_NAME} --service_name=${SERVICE_NAME}
+  environment:
+    name: staging
+  only:
+    - test        
+  tags:
+    - staging 
+
+
+
+# 内网开发 编译
+dev_build_job:
+  stage: build
+  variables:
+    PKG_NAME: ${TYPE}_${CI_PROJECT_NAME}_${VERSION_CODE}_${CI_PIPELINE_ID}
+    PKG_PATH: ${TYPE}/${CI_PROJECT_NAME}/${VERSION_CODE}
+  script:
+    - echo "Begin Build"
+    - source /etc/profile
+    
+    - if [ ! -x ~/go/gocode/src/${BUILD_PATH} ]; then mkdir -p ~/go/gocode/src/${BUILD_PATH}/ ; fi
+    
+    # 删除编译目录
+    - cd ~/go/gocode/src/${BUILD_PATH}/ && rm ${CI_PROJECT_NAME}/* -rf && cd -
+    
+    # 拷贝项目源码到 编译目录下（go 的编译目录在profile中设置）
+    
+    - cp ../${CI_PROJECT_NAME} ~/go/gocode/src/${BUILD_PATH}/ -rf
+    # 执行编译
+    - go build  ${BUILD_PATH}/${CI_PROJECT_NAME}
+
+    # 删除编译目录
+    - cd ~/go/gocode/src/${BUILD_PATH}/ && rm ${CI_PROJECT_NAME}/* -rf && cd -
+    
+    # 复制编译后的二进制文件到 存档目录
+    - if [ ! -x ./publish ]; then mkdir -p ./publish; fi
+    - cp ${CI_PROJECT_NAME} ./publish/
+    # - cp -r *.ini ./publish/
+    # - if [ -f ./*.xml ]; then cp -r *.xml ./publish/ ; fi
+
+    # 创建打包目录
+    - if [ ! -x ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/ ]; then mkdir -p ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/; fi 
+    # 打包存档目录，复制到打包目录
+    - tar -czf ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/${PKG_NAME}.tar.gz publish
+    
+  environment:
+    name: developement
+  tags:
+    - staging
+  only:
+    - master
+    
+# 内网服务器开发部署
+dev_deploy_job:
+  stage: deploy
+  variables: 
+    PKG_NAME: ${TYPE}_${CI_PROJECT_NAME}_${VERSION_CODE}_${CI_PIPELINE_ID}
+    PKG_PATH: ${TYPE}/${CI_PROJECT_NAME}/${VERSION_CODE}
+  script:
+  
+    # saltmaster 路径为: salt://pkg/<enviroment>/<TYPE>/项目/版本/xxx.tar.gz 如果不存在 先创建
+    - ssh -i ${SALT_KEY_PATH} ubuntu@${SALT_SERVER_NAME} \ 
+      "if [ ! -x /srv/salt/pkg/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/ ]; then sudo su && mkdir -p /srv/salt/pkg/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/ ; fi"
+
+    # 复制runner 上的程序打包文件到 saltstack master 
+    - cd ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/
+    - sudo scp -i ${SALT_KEY_PATH} ./${PKG_NAME}.tar.gz ubuntu@$SALT_SERVER_NAME://srv/salt/pkg/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/
+    
+    # 部署脚本 所有微服务共用一个脚本 提供完整参数
+    - ssh -i ${SALT_KEY_PATH} ubuntu@${SALT_SERVER_NAME} \
+      "sudo sh /srv/salt/script/developement/deploy.sh --pipeline=${CI_PIPELINE_ID} --version=${VERSION_CODE} --project=${CI_PROJECT_NAME}" --app_type=${TYPE} --environment=${CI_ENVIRONMENT_NAME} --service_name=${SERVICE_NAME}
+  environment:
+    name: developement
+  only:
+    - master        
+  tags:
+    - staging 
+
+# preview 编译
+preview_build_job:
+  stage: build
+  variables:
+    PKG_NAME: ${TYPE}_${CI_PROJECT_NAME}_${VERSION_CODE}_${CI_PIPELINE_ID}
+    PKG_PATH: ${TYPE}/${CI_PROJECT_NAME}/${VERSION_CODE}
+  script:
+    - echo "Begin Build"
+    - source /etc/profile
+    - if [ ! -x ~/go/gocode/src/${BUILD_PATH}/ ]; then mkdir -p ~/go/gocode/src/${BUILD_PATH}/ ; fi
+    
+    # 删除编译目录
+    - cd ~/go/gocode/src/${BUILD_PATH}/ && rm ${CI_PROJECT_NAME}/* -rf && cd -
+    
+    # 拷贝项目源码到 编译目录下（go 的编译目录在profile中设置）
+    - cp ../${CI_PROJECT_NAME} ~/go/gocode/src/${BUILD_PATH}/ -rf
+    # 执行编译
+    - go build  ${BUILD_PATH}/${CI_PROJECT_NAME}
+
+    # 删除编译目录
+    - cd ~/go/gocode/src/${BUILD_PATH} && rm ${CI_PROJECT_NAME}/* -rf && cd -
+    
+    # 复制编译后的二进制文件到 存档目录
+    - if [ ! -x ./publish ]; then mkdir -p ./publish; fi
+    - cp ${CI_PROJECT_NAME} ./publish/
+
+
+    # 创建打包目录
+    - if [ ! -x ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/ ]; then mkdir -p ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/; fi 
+    # 打包存档目录，复制到打包目录
+    - tar -czf ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/${PKG_NAME}.tar.gz publish
+    
+  environment:
+    name: preview
+  tags:
+    - staging
+  only:
+    - preview
+    
+# preview 部署
+preview_deploy_job:
+  stage: deploy
+  variables: 
+    PKG_NAME: ${TYPE}_${CI_PROJECT_NAME}_${VERSION_CODE}_${CI_PIPELINE_ID}
+    PKG_PATH: ${TYPE}/${CI_PROJECT_NAME}/${VERSION_CODE}
+  script:
+  
+    # saltmaster 路径为: salt://pkg/<enviroment>/<TYPE>/项目/版本/xxx.tar.gz 如果不存在 先创建
+    - ssh -i ${SALT_KEY_PATH} ubuntu@${SALT_SERVER_NAME} \ 
+      "if [ ! -x /srv/salt/pkg/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/ ]; then sudo su && mkdir -p /srv/salt/pkg/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/ ; fi"
+
+    # 复制runner 上的程序打包文件到 saltstack master 
+    - cd ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/
+    - sudo scp -i ${SALT_KEY_PATH} ./${PKG_NAME}.tar.gz ubuntu@$SALT_SERVER_NAME://srv/salt/pkg/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/
+    
+    # 部署脚本 所有微服务共用一个脚本 提供完整参数
+    - ssh -i ${SALT_KEY_PATH} ubuntu@${SALT_SERVER_NAME} \
+      "sudo sh /srv/salt/script/preview/deploy.sh --pipeline=${CI_PIPELINE_ID} --version=${VERSION_CODE} --project=${CI_PROJECT_NAME}" --app_type=${TYPE} --environment=${CI_ENVIRONMENT_NAME} --service_name=${SERVICE_NAME}
+  environment:
+    name: preview
+  only:
+    - preview        
+  tags:
+    - staging 
+    
+# 生产 编译
+pro_build_job:
+  stage: build
+  variables:
+    PKG_NAME: ${TYPE}_${CI_PROJECT_NAME}_${VERSION_CODE}_${CI_PIPELINE_ID}
+    PKG_PATH: ${TYPE}/${CI_PROJECT_NAME}/${VERSION_CODE}
+  script:
+    - echo "Begin Build"
+    - source /etc/profile
+    - if [ ! -x ~/go/gocode/src/${BUILD_PATH}/ ]; then mkdir -p ~/go/gocode/src/${BUILD_PATH}/ ; fi
+
+    # 删除编译目录
+    - cd ~/go/gocode/src/${BUILD_PATH}/ && rm ${CI_PROJECT_NAME}/* -rf && cd -
+    
+    # 拷贝项目源码到 编译目录下（go 的编译目录在profile中设置）
+    - cp ../${CI_PROJECT_NAME} ~/go/gocode/src/${BUILD_PATH} -rf
+    # 执行编译
+    - go build  ${BUILD_PATH}/${CI_PROJECT_NAME}
+
+    # 删除编译目录
+    - cd ~/go/gocode/src/ && rm ${BUILD_PATH}${CI_PROJECT_NAME}/* -rf && cd -
+    
+    # 复制编译后的二进制文件到 存档目录
+    - if [ ! -x ./publish ]; then mkdir -p ./publish; fi
+    - cp ${CI_PROJECT_NAME} ./publish/
+
+
+    # 创建打包目录
+    - if [ ! -x ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/ ]; then mkdir -p ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/; fi 
+    # 打包存档目录，复制到打包目录
+    - tar -czf ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/${PKG_NAME}.tar.gz publish
+  
+    # 上传到S3
+    - aws s3 cp ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/${PKG_NAME}.tar.gz s3://publish/${TYPE}/${CI_PROJECT_NAME}/${VERSION_CODE}/
+
+  environment:
+    name: production
+  tags:
+    - production
+  only:
+    - triggers
+    
+# 生产 部署
+pro_deploy_job:
+  stage: deploy
+  variables: 
+    PKG_NAME: ${TYPE}_${CI_PROJECT_NAME}_${VERSION_CODE}_${CI_PIPELINE_ID}
+    PKG_PATH: ${TYPE}/${CI_PROJECT_NAME}/${VERSION_CODE}
+    SALT_KEY:  ~/aws.pem                # 密钥路径
+    SALT_SERVER: 172.31.28.42  # 生产环境 salt 服务器
+  script:
+  
+    # saltmaster 路径为: salt://pkg/<enviroment>/<TYPE>/项目/版本/xxx.tar.gz 如果不存在 先创建
+    - ssh -i ${SALT_KEY} ubuntu@${SALT_SERVER} \ 
+      "if [ ! -x /srv/salt/pkg/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/ ]; then sudo su && mkdir -p /srv/salt/pkg/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/ ; fi"
+
+    # 复制runner 上的程序打包文件到 saltstack master 
+    - cd ~/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/
+    - scp -i ${SALT_KEY} ./${PKG_NAME}.tar.gz ubuntu@${SALT_SERVER}://srv/salt/pkg/${CI_ENVIRONMENT_NAME}/${PKG_PATH}/
+    
+    # 部署脚本 所有微服务共用一个脚本 提供完整参数
+    - ssh -i ${SALT_KEY} ubuntu@${SALT_SERVER} \
+      "sudo sh /srv/salt/script/production/deploy.sh --pipeline=${CI_PIPELINE_ID} --version=${VERSION_CODE} --project=${CI_PROJECT_NAME}" --app_type=${TYPE} --environment=${CI_ENVIRONMENT_NAME} --service_name=${SERVICE_NAME}
+  environment:
+    name: production
+  only:
+    - triggers        
+  tags:
+    - production 
+
+
+
